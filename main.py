@@ -40,13 +40,12 @@ APP_CONFIGS = {
         ],
     },
     "bank": {
-        "script": ROOT / "apps" / "bank" / "bot.py",
-        "token_env": "BANK_BOT_TOKEN",
-        "database_env": "BANK_DATABASE_URL",
-        "local_port": "10002",
-        "extra_env": [
-            "INITIAL_BANKROLL",
-            "CURRENCY",
+    "script": ROOT / "apps" / "bank" / "bot.py",
+    "token_env": "BANK_BOT_TOKEN",
+    "database_env": None,
+    "local_port": "10002",
+    "extra_env": [],
+},
         ],
     },
 }
@@ -72,8 +71,8 @@ def validate_configuration() -> None:
     for name, cfg in APP_CONFIGS.items():
         if not os.environ.get(cfg["token_env"], "").strip():
             missing.append(cfg["token_env"])
-        if not os.environ.get(cfg["database_env"], "").strip():
-            missing.append(cfg["database_env"])
+        if cfg["database_env"] and not os.environ.get(cfg["database_env"], "").strip():
+    missing.append(cfg["database_env"])
         if not cfg["script"].exists():
             missing.append(str(cfg["script"]))
 
@@ -90,6 +89,7 @@ def child_environment(name: str) -> dict:
     # Cada projeto original continua lendo BOT_TOKEN e DATABASE_URL.
     # O processo mestre converte as variáveis separadas para os nomes esperados.
     env["BOT_TOKEN"] = os.environ[cfg["token_env"]].strip()
+    if cfg["database_env"]:
     env["DATABASE_URL"] = os.environ[cfg["database_env"]].strip()
 
     # Os dois bots originais possuem Flask. Damos uma porta local diferente
