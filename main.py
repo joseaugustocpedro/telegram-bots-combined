@@ -40,13 +40,11 @@ APP_CONFIGS = {
         ],
     },
     "bank": {
-    "script": ROOT / "apps" / "bank" / "bot.py",
-    "token_env": "BANK_BOT_TOKEN",
-    "database_env": None,
-    "local_port": "10002",
-    "extra_env": [],
-},
-        ],
+        "script": ROOT / "apps" / "bank" / "bot.py",
+        "token_env": "BANK_BOT_TOKEN",
+        "database_env": None,
+        "local_port": "10002",
+        "extra_env": [],
     },
 }
 
