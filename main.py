@@ -69,8 +69,10 @@ def validate_configuration() -> None:
     for name, cfg in APP_CONFIGS.items():
         if not os.environ.get(cfg["token_env"], "").strip():
             missing.append(cfg["token_env"])
+
         if cfg["database_env"] and not os.environ.get(cfg["database_env"], "").strip():
-    missing.append(cfg["database_env"])
+            missing.append(cfg["database_env"])
+
         if not cfg["script"].exists():
             missing.append(str(cfg["script"]))
 
@@ -84,19 +86,15 @@ def child_environment(name: str) -> dict:
     cfg = APP_CONFIGS[name]
     env = os.environ.copy()
 
-    # Cada projeto original continua lendo BOT_TOKEN e DATABASE_URL.
-    # O processo mestre converte as variáveis separadas para os nomes esperados.
     env["BOT_TOKEN"] = os.environ[cfg["token_env"]].strip()
-    if cfg["database_env"]:
-    env["DATABASE_URL"] = os.environ[cfg["database_env"]].strip()
 
-    # Os dois bots originais possuem Flask. Damos uma porta local diferente
-    # para cada um; somente o servidor mestre usa a porta pública do Render.
+    if cfg["database_env"]:
+        env["DATABASE_URL"] = os.environ[cfg["database_env"]].strip()
+
     env["PORT"] = cfg["local_port"]
     env["PYTHONUNBUFFERED"] = "1"
 
     return env
-
 
 def launch_child(name: str) -> subprocess.Popen:
     cfg = APP_CONFIGS[name]
