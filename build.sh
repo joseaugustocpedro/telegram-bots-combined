@@ -16,7 +16,7 @@ git clone --depth 1 \
   apps/spy
 
 git clone --depth 1 \
-  https://github.com/joseaugustocpedro/telegram-bet-bot-pro.git \
+  https://github.com/joseaugustocpedro/telegram-bet-bot.git \
   apps/bank
 
 echo "==> Instalando dependências do Spy Bot"
