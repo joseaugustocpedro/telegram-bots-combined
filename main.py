@@ -175,17 +175,45 @@ class BankWebhookRuntime:
         logger.info("Webhook do Gestor configurado em %s", webhook_url)
 
     def submit(self, payload: dict[str, Any]) -> bool:
-        if not self.loop or not self.application or not self.ready.is_set() or self.failed:
+        """Agenda o update no loop do bot sem bloquear a resposta HTTP.
+
+        O Telegram repete o mesmo webhook quando recebe 5xx ou quando a resposta
+        demora. Por isso, não esperamos o processamento do comando aqui: apenas
+        colocamos o update na fila e devolvemos HTTP 200 imediatamente.
+        """
+        if (
+            not self.loop
+            or not self.loop.is_running()
+            or not self.application
+            or not self.ready.is_set()
+            or self.failed
+        ):
             return False
-        update = Update.de_json(payload, self.application.bot)
-        future = asyncio.run_coroutine_threadsafe(self.application.update_queue.put(update), self.loop)
+
         try:
-            future.result(timeout=1.5)
-            return True
+            update = Update.de_json(payload, self.application.bot)
         except Exception:
-            future.cancel()
-            logger.exception("Fila do webhook indisponível.")
+            logger.exception("Update inválido recebido pelo webhook.")
             return False
+
+        coroutine = self.application.update_queue.put(update)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+        except Exception:
+            coroutine.close()
+            logger.exception("Não foi possível agendar o update do webhook.")
+            return False
+
+        def log_enqueue_failure(completed_future) -> None:
+            try:
+                completed_future.result()
+            except asyncio.CancelledError:
+                logger.warning("Enfileiramento do update foi cancelado.")
+            except Exception:
+                logger.exception("Falha assíncrona ao enfileirar update do webhook.")
+
+        future.add_done_callback(log_enqueue_failure)
+        return True
 
     async def _async_stop(self) -> None:
         if self.application:
