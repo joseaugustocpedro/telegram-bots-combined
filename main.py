@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import logging
 import os
 import signal
@@ -30,6 +31,30 @@ process_lock = threading.Lock()
 spy_process: subprocess.Popen | None = None
 spy_last_exit_code: int | None = None
 spy_restart_count = 0
+
+# Evita que o mesmo update do Telegram seja processado mais de uma vez
+# quando o webhook é reenviado. O cache é pequeno para economizar RAM.
+processed_updates_lock = threading.Lock()
+processed_update_ids: OrderedDict[int, None] = OrderedDict()
+MAX_PROCESSED_UPDATES = 512
+
+
+def reserve_update_id(update_id: int) -> bool:
+    """Reserva um update_id. Retorna False quando ele já foi recebido."""
+    with processed_updates_lock:
+        if update_id in processed_update_ids:
+            return False
+        processed_update_ids[update_id] = None
+        processed_update_ids.move_to_end(update_id)
+        while len(processed_update_ids) > MAX_PROCESSED_UPDATES:
+            processed_update_ids.popitem(last=False)
+        return True
+
+
+def release_update_id(update_id: int) -> None:
+    """Libera a reserva quando não foi possível colocar o update na fila."""
+    with processed_updates_lock:
+        processed_update_ids.pop(update_id, None)
 
 
 def env(name: str, default: str = "") -> str:
@@ -142,8 +167,10 @@ class BankWebhookRuntime:
             url=webhook_url,
             secret_token=env("BANK_WEBHOOK_SECRET"),
             allowed_updates=["message", "callback_query"],
-            drop_pending_updates=False,
-            max_connections=2,
+            # Limpa updates antigos de deploys anteriores e usa apenas uma
+            # conexão para reduzir duplicidade e consumo no plano Free.
+            drop_pending_updates=True,
+            max_connections=1,
         )
         logger.info("Webhook do Gestor configurado em %s", webhook_url)
 
@@ -214,7 +241,21 @@ def telegram_bank_webhook():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "invalid_json"}), 400
+
+    raw_update_id = payload.get("update_id")
+    try:
+        update_id = int(raw_update_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_update_id"}), 400
+
+    # O Telegram pode reenviar o mesmo webhook quando a conexão oscila.
+    # Respondemos 200 para duplicatas, mas não executamos o comando novamente.
+    if not reserve_update_id(update_id):
+        logger.info("Update duplicado ignorado: %s", update_id)
+        return "", 200
+
     if not bank_runtime.submit(payload):
+        release_update_id(update_id)
         return jsonify({"error": "runtime_unavailable"}), 503
     return "", 200
 
