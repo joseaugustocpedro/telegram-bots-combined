@@ -1,202 +1,252 @@
+from __future__ import annotations
+
+import asyncio
 import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any
 
-from flask import Flask, jsonify
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("combined-telegram-bots")
+from flask import Flask, jsonify, request
+from telegram import Update
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 
-APP_CONFIGS = {
-    "spy": {
-        "script": ROOT / "apps" / "spy" / "bot.py",
-        "token_env": "SPY_BOT_TOKEN",
-        "database_env": "SPY_DATABASE_URL",
-        "local_port": "10001",
-    },
-    "bank": {
-        "script": ROOT / "apps" / "bank" / "bot.py",
-        "token_env": "BANK_BOT_TOKEN",
-        "database_env": "BANK_DATABASE_URL",
-        "local_port": "10002",
-    },
-}
+from apps.bank.bot import build_application  # noqa: E402
+from apps.bank.dashboard import dashboard_bp, initialize_dashboard_database  # noqa: E402
 
-processes: Dict[str, subprocess.Popen] = {}
-stop_event = threading.Event()
-lock = threading.Lock()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("combined-telegram-bots-v3-lite")
+
 web_app = Flask(__name__)
+web_app.register_blueprint(dashboard_bp)
+stop_event = threading.Event()
+process_lock = threading.Lock()
+spy_process: subprocess.Popen | None = None
+spy_last_exit_code: int | None = None
+spy_restart_count = 0
 
 
-def masked(value: Optional[str]) -> str:
-    if not value:
-        return "ausente"
-    return "***" if len(value) <= 8 else f"{value[:4]}...{value[-4:]}"
+def env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
 
 
 def validate_configuration() -> None:
-    missing = []
-    for _, cfg in APP_CONFIGS.items():
-        if not os.environ.get(cfg["token_env"], "").strip():
-            missing.append(cfg["token_env"])
-        if not os.environ.get(cfg["database_env"], "").strip():
-            missing.append(cfg["database_env"])
-        if not cfg["script"].exists():
-            missing.append(str(cfg["script"]))
+    required = [
+        "SPY_BOT_TOKEN",
+        "SPY_DATABASE_URL",
+        "BANK_BOT_TOKEN",
+        "BANK_DATABASE_URL",
+        "DASHBOARD_BASE_URL",
+        "DASHBOARD_SECRET",
+        "BANK_WEBHOOK_SECRET",
+    ]
+    missing = [name for name in required if not env(name)]
     if missing:
-        raise RuntimeError("Configuração/arquivos ausentes: " + ", ".join(missing))
+        raise RuntimeError("Variáveis ausentes: " + ", ".join(missing))
+    if len(env("DASHBOARD_SECRET")) < 32:
+        raise RuntimeError("DASHBOARD_SECRET precisa ter pelo menos 32 caracteres.")
+    if not env("DASHBOARD_BASE_URL").startswith("https://"):
+        raise RuntimeError("DASHBOARD_BASE_URL precisa começar com https://")
+    if not (ROOT / "apps" / "spy" / "bot.py").exists():
+        raise RuntimeError("apps/spy/bot.py não encontrado. Execute o build.sh.")
 
 
-def child_environment(name: str) -> dict:
-    cfg = APP_CONFIGS[name]
-    env = os.environ.copy()
-    env["BOT_TOKEN"] = os.environ[cfg["token_env"]].strip()
-    env["DATABASE_URL"] = os.environ[cfg["database_env"]].strip()
-    env["PORT"] = cfg["local_port"]
-    env["PYTHONUNBUFFERED"] = "1"
-    return env
+def _spy_environment() -> dict[str, str]:
+    child = os.environ.copy()
+    child["BOT_TOKEN"] = env("SPY_BOT_TOKEN")
+    child["DATABASE_URL"] = env("SPY_DATABASE_URL")
+    child["PORT"] = env("SPY_INTERNAL_PORT", "10001")
+    child["PYTHONUNBUFFERED"] = "1"
+    # O Spy não precisa enxergar os segredos do Gestor.
+    for key in ("BANK_BOT_TOKEN", "BANK_DATABASE_URL", "DASHBOARD_SECRET", "BANK_WEBHOOK_SECRET"):
+        child.pop(key, None)
+    return child
 
 
-def launch_child(name: str) -> subprocess.Popen:
-    cfg = APP_CONFIGS[name]
-    env = child_environment(name)
-    logger.info(
-        "Iniciando %s | script=%s | token=%s | banco=%s | porta=%s",
-        name,
-        cfg["script"],
-        masked(env.get("BOT_TOKEN")),
-        "configurado" if env.get("DATABASE_URL") else "ausente",
-        env["PORT"],
-    )
+def launch_spy() -> subprocess.Popen:
+    script = ROOT / "apps" / "spy" / "bot.py"
+    logger.info("Iniciando Spy Bot em subprocesso isolado.")
     return subprocess.Popen(
-        ["python", "-u", str(cfg["script"])],
-        cwd=str(cfg["script"].parent),
-        env=env,
+        [sys.executable, "-u", str(script)],
+        cwd=str(script.parent),
+        env=_spy_environment(),
     )
 
 
-def child_restart_delay(default: int = 120) -> int:
-    raw = os.environ.get("CHILD_RESTART_DELAY_SECONDS", str(default)).strip()
-    try:
-        return max(30, int(raw))
-    except ValueError:
-        logger.warning("CHILD_RESTART_DELAY_SECONDS inválido: %r. Usando %ss.", raw, default)
-        return default
-
-
-def monitor_child(name: str) -> None:
+def monitor_spy() -> None:
+    global spy_process, spy_last_exit_code, spy_restart_count
+    delay = max(30, int(env("CHILD_RESTART_DELAY_SECONDS", "120")))
     while not stop_event.is_set():
         try:
-            process = launch_child(name)
-            with lock:
-                processes[name] = process
-
+            process = launch_spy()
+            with process_lock:
+                spy_process = process
             exit_code = process.wait()
-
-            with lock:
-                processes.pop(name, None)
-
+            with process_lock:
+                spy_process = None
+                spy_last_exit_code = exit_code
+                spy_restart_count += 1
             if stop_event.is_set():
-                break
-
-            restart_delay = child_restart_delay()
-            logger.error(
-                "%s encerrou com código %s. Reiniciando em %ss.",
-                name,
-                exit_code,
-                restart_delay,
-            )
-            stop_event.wait(restart_delay)
+                return
+            logger.error("Spy Bot encerrou com código %s. Reinício em %ss.", exit_code, delay)
+            stop_event.wait(delay)
         except Exception:
-            restart_delay = child_restart_delay()
-            logger.exception("Falha ao iniciar/monitorar %s. Tentando novamente em %ss.", name, restart_delay)
-            stop_event.wait(restart_delay)
+            logger.exception("Falha ao iniciar/monitorar Spy Bot.")
+            stop_event.wait(delay)
+
+
+class BankWebhookRuntime:
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.application = None
+        self.thread: threading.Thread | None = None
+        self.ready = threading.Event()
+        self.failed: Exception | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._thread_main, daemon=True, name="bank-webhook-runtime")
+        self.thread.start()
+        if not self.ready.wait(timeout=45):
+            raise RuntimeError("Timeout ao iniciar o Gestor de Banca.")
+        if self.failed:
+            raise RuntimeError("Falha ao iniciar o Gestor de Banca.") from self.failed
+
+    def _thread_main(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._async_start())
+            self.ready.set()
+            self.loop.run_forever()
+        except Exception as exc:
+            self.failed = exc
+            logger.exception("Runtime do Gestor falhou.")
+            self.ready.set()
+        finally:
+            if self.loop and not self.loop.is_closed():
+                self.loop.run_until_complete(self._async_stop())
+                self.loop.close()
+
+    async def _async_start(self) -> None:
+        self.application = build_application(env("BANK_BOT_TOKEN"))
+        await self.application.initialize()
+        await self.application.start()
+        webhook_url = env("DASHBOARD_BASE_URL").rstrip("/") + "/telegram/bank"
+        await self.application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=env("BANK_WEBHOOK_SECRET"),
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=False,
+            max_connections=2,
+        )
+        logger.info("Webhook do Gestor configurado em %s", webhook_url)
+
+    def submit(self, payload: dict[str, Any]) -> bool:
+        if not self.loop or not self.application or not self.ready.is_set() or self.failed:
+            return False
+        update = Update.de_json(payload, self.application.bot)
+        future = asyncio.run_coroutine_threadsafe(self.application.update_queue.put(update), self.loop)
+        try:
+            future.result(timeout=1.5)
+            return True
+        except Exception:
+            future.cancel()
+            logger.exception("Fila do webhook indisponível.")
+            return False
+
+    async def _async_stop(self) -> None:
+        if self.application:
+            try:
+                await self.application.stop()
+            finally:
+                await self.application.shutdown()
+
+    def stop(self) -> None:
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.thread:
+            self.thread.join(timeout=15)
+
+
+bank_runtime = BankWebhookRuntime()
+
+
+@web_app.get("/")
+def index():
+    return {
+        "status": "online",
+        "service": "telegram-bots-combined-v3-lite",
+        "dashboard": "/dashboard/<link-gerado-pelo-bot>",
+    }, 200
+
+
+@web_app.get("/health")
+def health():
+    with process_lock:
+        process = spy_process
+        spy_running = bool(process and process.poll() is None)
+    payload = {
+        "status": "online" if bank_runtime.ready.is_set() and not bank_runtime.failed else "degraded",
+        "bank": {
+            "webhook_runtime": bank_runtime.ready.is_set() and bank_runtime.failed is None,
+            "queue_size": bank_runtime.application.update_queue.qsize() if bank_runtime.application else None,
+        },
+        "spy": {
+            "running": spy_running,
+            "last_exit_code": spy_last_exit_code,
+            "restart_count": spy_restart_count,
+        },
+    }
+    return jsonify(payload), 200 if payload["status"] == "online" else 503
+
+
+@web_app.post("/telegram/bank")
+def telegram_bank_webhook():
+    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if supplied_secret != env("BANK_WEBHOOK_SECRET"):
+        return jsonify({"error": "forbidden"}), 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_json"}), 400
+    if not bank_runtime.submit(payload):
+        return jsonify({"error": "runtime_unavailable"}), 503
+    return "", 200
 
 
 def shutdown(signum=None, frame=None) -> None:
     if stop_event.is_set():
         return
-
     logger.info("Encerrando serviço combinado...")
     stop_event.set()
-
-    with lock:
-        current = list(processes.items())
-
-    for name, process in current:
-        if process.poll() is None:
-            logger.info("Enviando SIGTERM para %s.", name)
-            process.terminate()
-
-    deadline = time.time() + 20
-    for name, process in current:
+    with process_lock:
+        process = spy_process
+    if process and process.poll() is None:
+        process.terminate()
         try:
-            process.wait(timeout=max(0, deadline - time.time()))
+            process.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            logger.warning("Forçando encerramento de %s.", name)
             process.kill()
-
-
-@web_app.get("/")
-def health():
-    result = {}
-    with lock:
-        for name in APP_CONFIGS:
-            process = processes.get(name)
-            result[name] = {
-                "running": bool(process and process.poll() is None),
-                "pid": process.pid if process and process.poll() is None else None,
-                "exit_code": process.poll() if process else None,
-            }
-
-    all_running = all(item["running"] for item in result.values())
-    return jsonify(
-        {
-            "status": "online" if all_running else "degraded",
-            "service": "telegram-bots-combined",
-            "bots": result,
-            "child_restart_delay_seconds": child_restart_delay(),
-        }
-    ), 200 if all_running else 503
-
-
-@web_app.get("/health")
-def health_alias():
-    return health()
+    bank_runtime.stop()
+    if signum is not None:
+        raise SystemExit(0)
 
 
 def main() -> None:
     validate_configuration()
+    initialize_dashboard_database()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-
-    for name in APP_CONFIGS:
-        threading.Thread(
-            target=monitor_child,
-            args=(name,),
-            daemon=True,
-            name=f"monitor-{name}",
-        ).start()
-
-    port = int(os.environ.get("PORT", "10000"))
-    logger.info("Servidor mestre disponível em 0.0.0.0:%s", port)
-    try:
-        web_app.run(
-            host="0.0.0.0",
-            port=port,
-            debug=False,
-            use_reloader=False,
-            threaded=True,
-        )
-    finally:
-        shutdown()
+    bank_runtime.start()
+    threading.Thread(target=monitor_spy, daemon=True, name="spy-monitor").start()
+    port = int(env("PORT", "10000"))
+    logger.info("Servidor público iniciado na porta %s.", port)
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":

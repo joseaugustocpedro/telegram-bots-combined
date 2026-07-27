@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Atualizando pip"
+SPY_REPO_URL="${SPY_REPO_URL:-https://github.com/joseaugustocpedro/polymarket-spy-bot.git}"
+BANK_REPO_URL="${BANK_REPO_URL:-https://github.com/joseaugustocpedro/telegram-bet-bot.git}"
+SPY_REPO_REF="${SPY_REPO_REF:-main}"
+BANK_REPO_REF="${BANK_REPO_REF:-main}"
+
 python -m pip install --upgrade pip
+pip install --no-cache-dir -r requirements.txt
 
-echo "==> Instalando dependências do serviço mestre"
-pip install -r requirements.txt
-
-echo "==> Baixando as versões mais recentes dos dois bots"
 rm -rf apps
 mkdir -p apps
+touch apps/__init__.py
 
-git clone --depth 1 \
-  https://github.com/joseaugustocpedro/polymarket-spy-bot.git \
-  apps/spy
+echo "==> Baixando Spy Bot (${SPY_REPO_REF})"
+git clone --depth 1 --branch "$SPY_REPO_REF" "$SPY_REPO_URL" apps/spy
 
-git clone --depth 1 \
-  https://github.com/joseaugustocpedro/telegram-bet-bot.git \
-  apps/bank
+echo "==> Baixando Gestor de Banca (${BANK_REPO_REF})"
+git clone --depth 1 --branch "$BANK_REPO_REF" "$BANK_REPO_URL" apps/bank
 
-echo "==> Instalando dependências do Spy Bot"
-pip install -r apps/spy/requirements.txt
+# Garante que o projeto do Gestor possa ser importado como pacote Python.
+touch apps/bank/__init__.py
 
-echo "==> Instalando dependências do Gestor de Banca Pro"
-pip install -r apps/bank/requirements.txt
+pip install --no-cache-dir -r apps/spy/requirements.txt
+pip install --no-cache-dir -r apps/bank/requirements.txt
 
-echo "==> Validando sintaxe"
 python -m py_compile main.py
 python -m py_compile apps/spy/bot.py
 python -m py_compile apps/bank/bot.py
+python -m py_compile apps/bank/config.py
+python -m py_compile apps/bank/database.py
+python -m py_compile apps/bank/dashboard.py
+python -m py_compile apps/bank/security.py
 
 echo "==> Build concluído"

@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: telegram-bots-combined
+    runtime: python
+    plan: free
+    buildCommand: bash build.sh
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: SPY_BOT_TOKEN
+        sync: false
+      - key: SPY_DATABASE_URL
+        sync: false
+      - key: BANK_BOT_TOKEN
+        sync: false
+      - key: BANK_DATABASE_URL
+        sync: false
+      - key: DASHBOARD_BASE_URL
+        sync: false
+      - key: DASHBOARD_SECRET
+        sync: false
+      - key: BANK_WEBHOOK_SECRET
+        sync: false
+      - key: INITIAL_BANKROLL
+        value: "1000"
+      - key: CURRENCY
+        value: "R$"
+      - key: BANK_TIMEZONE
+        value: America/Sao_Paulo
+      - key: DASHBOARD_LINK_HOURS
+        value: "168"
+      - key: MAX_STAKE_PERCENT
+        value: "5"
+      - key: MAX_OPEN_EXPOSURE_PERCENT
+        value: "15"
+      - key: FREE_TIER_MODE
+        value: "true"
+      - key: POLL_INTERVAL
+        value: "1800"
+      - key: FETCH_LIMIT
+        value: "10"
+      - key: MAX_WALLETS_PER_CYCLE
+        value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: PYTHONUNBUFFERED
+        value: "1"
