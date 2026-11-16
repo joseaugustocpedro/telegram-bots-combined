@@ -2,7 +2,7 @@
 
 Serviço em Python que consolida múltiplos bots e um dashboard web em uma única aplicação, projetado para execução em ambientes com memória e CPU limitadas.
 
-O objetivo técnico é demonstrar **integração de serviços, arquitetura orientada a webhooks, gerenciamento de subprocessos e otimização de infraestrutura**.
+O objetivo técnico é explorar **integração de serviços, arquitetura orientada a webhooks, gerenciamento de subprocessos e otimização de infraestrutura**. Esta documentação descreve a configuração pretendida; não representa evidência de deploy público, segurança ou disponibilidade contínua.
 
 ## Arquitetura
 
@@ -22,6 +22,12 @@ Subprocesso separado
    └── Polymarket Spy
 ```
 
+## Pré-requisitos e limitações
+
+O script `build.sh` clona os repositórios públicos [`polymarket-spy-bot`](https://github.com/joseaugustocpedro/polymarket-spy-bot) e [`telegram-bet-bot`](https://github.com/joseaugustocpedro/telegram-bet-bot) para a pasta local `apps/`. Portanto, **este repositório não é autocontido**: o build depende desses códigos e de acesso à internet. Por padrão, usa os ramos `main`; para tornar uma execução reproduzível, fixe `SPY_REPO_REF` e `BANK_REPO_REF` em referências estáveis verificadas.
+
+Não publique variáveis secretas e não considere o dashboard pronto para exposição pública sem revisão específica de autenticação, deploy e dados.
+
 ## Decisões de engenharia
 
 - uma única porta HTTP pública;
@@ -33,7 +39,7 @@ Subprocesso separado
 - configuração por variáveis de ambiente;
 - endpoint `/health` para monitoramento da aplicação.
 
-## Deploy no Render
+## Configuração para Render (não validada nesta revisão)
 
 ### Build
 
