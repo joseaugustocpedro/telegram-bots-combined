@@ -1,0 +1,25 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# build.sh downloads these repos locally
+/apps/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# runtime data and log files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
